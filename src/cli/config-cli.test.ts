@@ -41,6 +41,23 @@ vi.mock("../config/runtime-schema.js", () => ({
   readBestEffortRuntimeConfigSchema: () => mockReadBestEffortRuntimeConfigSchema(),
 }));
 
+const mockResolveExternalCliAuthScopeFromConfig = vi.fn();
+const mockEnsureAuthProfileStore = vi.fn();
+const mockBuildAuthHealthSummary = vi.fn();
+
+vi.mock("../agents/auth-profiles/external-cli-scope.js", () => ({
+  resolveExternalCliAuthScopeFromConfig: (...args: unknown[]) =>
+    mockResolveExternalCliAuthScopeFromConfig(...args),
+}));
+
+vi.mock("../agents/auth-profiles.js", () => ({
+  ensureAuthProfileStore: (...args: unknown[]) => mockEnsureAuthProfileStore(...args),
+}));
+
+vi.mock("../agents/auth-health.js", () => ({
+  buildAuthHealthSummary: (...args: unknown[]) => mockBuildAuthHealthSummary(...args),
+}));
+
 const { defaultRuntime, resetRuntimeCapture } = createCliRuntimeCapture();
 const mockLog = defaultRuntime.log;
 const mockError = defaultRuntime.error;
@@ -191,6 +208,14 @@ describe("config cli", () => {
       throw new Error(`__exit__:${code} - ${errorMessages}`);
     });
     mockResolveSecretRefValue.mockResolvedValue("resolved-secret");
+    mockEnsureAuthProfileStore.mockReturnValue({ profiles: {} });
+    mockBuildAuthHealthSummary.mockReturnValue({
+      now: Date.now(),
+      warnAfterMs: 86400000,
+      profiles: [],
+      providers: [],
+    });
+    mockResolveExternalCliAuthScopeFromConfig.mockReturnValue(undefined);
   });
 
   describe("config set - issue #6070", () => {
@@ -599,6 +624,121 @@ describe("config cli", () => {
     });
   });
 
+  describe("config check", () => {
+    it("prints success and exits 0 when config is valid with no OAuth providers", async () => {
+      const resolved: OpenClawConfig = { gateway: { port: 18789 } };
+      setSnapshot(resolved, resolved);
+      mockResolveExternalCliAuthScopeFromConfig.mockReturnValueOnce(undefined);
+      mockBuildAuthHealthSummary.mockReturnValueOnce({
+        now: Date.now(),
+        warnAfterMs: 86400000,
+        profiles: [],
+        providers: [],
+      });
+
+      await runConfigCommand(["config", "check"]);
+
+      expect(mockExit).not.toHaveBeenCalled();
+      expect(mockError).not.toHaveBeenCalled();
+      expect(mockLog).toHaveBeenCalledWith(expect.stringContaining("Config valid:"));
+      expect(mockLog).toHaveBeenCalledWith(expect.stringContaining("No OAuth providers"));
+    });
+
+    it("reports ok auth status for configured providers", async () => {
+      const resolved: OpenClawConfig = { gateway: { port: 18789 } };
+      setSnapshot(resolved, resolved);
+      mockResolveExternalCliAuthScopeFromConfig.mockReturnValueOnce({
+        providerIds: ["anthropic"],
+        profileIds: ["anthropic:default"],
+      });
+      mockBuildAuthHealthSummary.mockReturnValueOnce({
+        now: Date.now(),
+        warnAfterMs: 86400000,
+        profiles: [],
+        providers: [{ provider: "anthropic", status: "ok", profiles: [] }],
+      });
+
+      await runConfigCommand(["config", "check"]);
+
+      expect(mockExit).not.toHaveBeenCalled();
+      expect(mockLog).toHaveBeenCalledWith(expect.stringContaining("Config valid:"));
+      expect(mockLog).toHaveBeenCalledWith(expect.stringMatching(/anthropic.*ok|ok.*anthropic/));
+    });
+
+    it("exits 1 when config schema is invalid", async () => {
+      setSnapshotOnce(
+        makeInvalidSnapshot({
+          issues: [{ path: "gateway.bind", message: "Invalid enum value" }],
+        }),
+      );
+
+      await expect(runConfigCommand(["config", "check"])).rejects.toThrow("__exit__:1");
+
+      expect(mockError).toHaveBeenCalledWith(expect.stringContaining("Config invalid at"));
+    });
+
+    it("exits 1 when config file is missing", async () => {
+      setSnapshotOnce({
+        path: "/tmp/openclaw.json",
+        exists: false,
+        raw: null,
+        parsed: {},
+        resolved: {},
+        sourceConfig: {},
+        valid: true,
+        config: {},
+        runtimeConfig: {},
+        issues: [],
+        warnings: [],
+        legacyIssues: [],
+      });
+
+      await expect(runConfigCommand(["config", "check"])).rejects.toThrow("__exit__:1");
+      expect(mockError).toHaveBeenCalledWith(expect.stringContaining("Config file not found:"));
+    });
+
+    it("outputs JSON with valid: true and auth providers on success", async () => {
+      const resolved: OpenClawConfig = { gateway: { port: 18789 } };
+      setSnapshot(resolved, resolved);
+      mockResolveExternalCliAuthScopeFromConfig.mockReturnValueOnce({
+        providerIds: ["openai"],
+        profileIds: [],
+      });
+      mockBuildAuthHealthSummary.mockReturnValueOnce({
+        now: Date.now(),
+        warnAfterMs: 86400000,
+        profiles: [],
+        providers: [{ provider: "openai", status: "ok", profiles: [] }],
+      });
+
+      await runConfigCommand(["config", "check", "--json"]);
+
+      const raw = mockLog.mock.calls.at(0)?.[0];
+      const payload = JSON.parse(String(raw)) as {
+        valid: boolean;
+        path: string;
+        auth: { ok: boolean; providers: Array<{ provider: string; status: string }> };
+      };
+      expect(payload.valid).toBe(true);
+      expect(payload.auth.ok).toBe(true);
+      expect(payload.auth.providers).toEqual([{ provider: "openai", status: "ok", profiles: [] }]);
+    });
+
+    it("outputs JSON with valid: false when schema is invalid", async () => {
+      setSnapshotOnce(
+        makeInvalidSnapshot({
+          issues: [{ path: "gateway.bind", message: "Invalid enum value" }],
+        }),
+      );
+
+      await expect(runConfigCommand(["config", "check", "--json"])).rejects.toThrow("__exit__:1");
+      const raw = mockLog.mock.calls.at(0)?.[0];
+      const payload = JSON.parse(String(raw)) as { valid: boolean; issues: unknown[] };
+      expect(payload.valid).toBe(false);
+      expect(payload.issues).toHaveLength(1);
+    });
+  });
+
   describe("config schema", () => {
     it("prints the generated JSON schema as plain text", async () => {
       const { computeBaseConfigSchemaResponse } = await import("../config/schema-base.js");
@@ -744,7 +884,7 @@ describe("config cli", () => {
       const helpText = setCommand?.helpInformation() ?? "";
       const configHelpText = configCommand?.helpInformation() ?? "";
 
-      expect(configHelpText).toContain("get/set/patch/unset/file/schema/validate");
+      expect(configHelpText).toContain("get/set/patch/unset/file/schema/validate/check");
       expect(configHelpText).not.toContain("get/set/apply/unset/file/schema/validate");
       expect(helpText).toContain("--strict-json");
       expect(helpText).toContain("--json");

@@ -1795,11 +1795,113 @@ export async function runConfigValidate(opts: { json?: boolean; runtime?: Runtim
   }
 }
 
+function isAuthProviderStatusOk(status: string): boolean {
+  return status === "ok" || status === "static" || status === "expiring";
+}
+
+export async function runConfigCheck(opts: { json?: boolean; runtime?: RuntimeEnv } = {}) {
+  const runtime = opts.runtime ?? defaultRuntime;
+  let outputPath = CONFIG_PATH ?? "openclaw.json";
+
+  try {
+    const snapshot = await readConfigFileSnapshot();
+    outputPath = snapshot.path;
+    const shortPath = shortenHomePath(outputPath);
+
+    if (!snapshot.exists) {
+      if (opts.json) {
+        writeRuntimeJson(runtime, { valid: false, path: outputPath, error: "file not found" }, 0);
+      } else {
+        runtime.error(danger(`Config file not found: ${shortPath}`));
+      }
+      runtime.exit(1);
+      return;
+    }
+
+    if (!snapshot.valid) {
+      const issues = normalizeConfigIssues(snapshot.issues);
+      if (opts.json) {
+        writeRuntimeJson(runtime, { valid: false, path: outputPath, issues });
+      } else {
+        runtime.error(danger(`Config invalid at ${shortPath}:`));
+        for (const line of formatConfigIssueLines(issues, danger("×"), { normalizeRoot: true })) {
+          runtime.error(`  ${line}`);
+        }
+        runtime.error("");
+        runtime.error(formatDoctorHint("to repair, or fix the keys above manually."));
+      }
+      runtime.exit(1);
+      return;
+    }
+
+    const cfg = snapshot.config;
+    const { resolveExternalCliAuthScopeFromConfig } =
+      await import("../agents/auth-profiles/external-cli-scope.js");
+    const { ensureAuthProfileStore } = await import("../agents/auth-profiles.js");
+    const { buildAuthHealthSummary } = await import("../agents/auth-health.js");
+
+    const scope = resolveExternalCliAuthScopeFromConfig(cfg);
+    const store = ensureAuthProfileStore(undefined, {
+      allowKeychainPrompt: false,
+      config: cfg,
+      externalCliProviderIds: scope?.providerIds,
+      externalCliProfileIds: scope?.profileIds,
+    });
+    const summary = buildAuthHealthSummary({
+      store,
+      cfg,
+      providers: scope?.providerIds,
+    });
+
+    const authOk = summary.providers.every((p) => isAuthProviderStatusOk(p.status));
+
+    if (opts.json) {
+      writeRuntimeJson(
+        runtime,
+        {
+          valid: true,
+          path: outputPath,
+          auth: {
+            ok: authOk,
+            providers: summary.providers.map((p) => ({
+              provider: p.provider,
+              status: p.status,
+              profiles: p.profiles.map((pr) => ({
+                profileId: pr.profileId,
+                type: pr.type,
+                status: pr.status,
+              })),
+            })),
+          },
+        },
+        0,
+      );
+    } else {
+      runtime.log(success(`Config valid: ${shortPath}`));
+      if (summary.providers.length === 0) {
+        runtime.log(theme.muted("  No OAuth providers configured."));
+      } else {
+        for (const p of summary.providers) {
+          const icon = isAuthProviderStatusOk(p.status) ? success("✓") : danger("✗");
+          runtime.log(`  ${icon} ${p.provider}: ${p.status}`);
+        }
+      }
+    }
+  } catch (err) {
+    if (opts.json) {
+      writeRuntimeJson(runtime, { valid: false, path: outputPath, error: String(err) }, 0);
+    } else {
+      runtime.error(danger(`Config check error: ${String(err)}`));
+    }
+    runtime.exit(1);
+  }
+}
+
 export function registerConfigCli(program: Command) {
   const cmd = program
     .command("config")
     .description(
-      "Non-interactive config helpers (get/set/patch/unset/file/schema/validate). Run without subcommand for guided setup.",
+      "Non-interactive config helpers (get/set/patch/unset/file/schema/validate/check). Run without subcommand for guided setup.",
     )
     .addHelpText(
       "after",
@@ -1964,5 +2066,15 @@ export function registerConfigCli(program: Command) {
     .option("--json", "Output validation result as JSON", false)
     .action(async (opts) => {
       await runConfigValidate({ json: Boolean(opts.json) });
+    });
+
+  cmd
+    .command("check")
+    .description(
+      "Check config health: validates schema and reports auth status for configured providers",
+    )
+    .option("--json", "Output check result as JSON", false)
+    .action(async (opts) => {
+      await runConfigCheck({ json: Boolean(opts.json) });
     });
 }
