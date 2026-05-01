@@ -1795,6 +1795,10 @@ export async function runConfigValidate(opts: { json?: boolean; runtime?: Runtim
   }
 }
 
+function isAuthProviderStatusOk(status: string): boolean {
+  return status === "ok" || status === "static" || status === "expiring";
+}
+
 export async function runConfigCheck(opts: { json?: boolean; runtime?: RuntimeEnv } = {}) {
   const runtime = opts.runtime ?? defaultRuntime;
   let outputPath = CONFIG_PATH ?? "openclaw.json";
@@ -1849,9 +1853,7 @@ export async function runConfigCheck(opts: { json?: boolean; runtime?: RuntimeEn
       providers: scope?.providerIds,
     });
 
-    const authOk = summary.providers.every(
-      (p) => p.status === "ok" || p.status === "static" || p.status === "expiring",
-    );
+    const authOk = summary.providers.every((p) => isAuthProviderStatusOk(p.status));
 
     if (opts.json) {
       writeRuntimeJson(
@@ -1880,10 +1882,7 @@ export async function runConfigCheck(opts: { json?: boolean; runtime?: RuntimeEn
         runtime.log(theme.muted("  No OAuth providers configured."));
       } else {
         for (const p of summary.providers) {
-          const icon =
-            p.status === "ok" || p.status === "static" || p.status === "expiring"
-              ? success("✓")
-              : danger("✗");
+          const icon = isAuthProviderStatusOk(p.status) ? success("✓") : danger("✗");
           runtime.log(`  ${icon} ${p.provider}: ${p.status}`);
         }
       }

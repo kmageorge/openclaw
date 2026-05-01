@@ -662,9 +662,7 @@ describe("config cli", () => {
 
       expect(mockExit).not.toHaveBeenCalled();
       expect(mockLog).toHaveBeenCalledWith(expect.stringContaining("Config valid:"));
-      expect(mockLog).toHaveBeenCalledWith(
-        expect.stringContaining("anthropic") && expect.stringContaining("ok"),
-      );
+      expect(mockLog).toHaveBeenCalledWith(expect.stringMatching(/anthropic.*ok|ok.*anthropic/));
     });
 
     it("exits 1 when config schema is invalid", async () => {
