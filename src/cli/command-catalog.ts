@@ -267,6 +267,11 @@ export const cliCommandCatalog: readonly CliCommandCatalogEntry[] = [
     policy: { bypassConfigGuard: true, networkProxy: "bypass" },
   },
   {
+    commandPath: ["config", "check"],
+    exact: true,
+    policy: { bypassConfigGuard: true, networkProxy: "bypass" },
+  },
+  {
     commandPath: ["config", "schema"],
     exact: true,
     policy: { bypassConfigGuard: true, networkProxy: "bypass" },
